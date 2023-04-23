@@ -1,87 +1,74 @@
 clear variables;
 close all;
 
-modfm = @(t,fm,fc,I) exp(I.*cos(2*pi*fm.*t)).*cos(2*pi*fc.*t);
+modfm = @(t,fm,fc,I) exp(I.*cos(2*pi*fm.*t)).*cos(2*pi*fc.*t); % Normalize? -- should be handled by w
+classicfm = @(t,fm,fc,I) cos(2*pi*fc + I.*sin(2*pi*fm.*t));
 synth = @(t,fm,k,I,w) sum(w.*modfm(t,fm,k.*fm,I));
 
 % Load the sound file
+% x = audioread("Oboe.ff.A4.stereo.aiff");
 x = audioread("Trumpet.novib.ff.C6.stereo.aiff");
+
 x = (x(:,1) + x(:,2)) / 2;  % Convert from stereo to mono
 % TODO: better way of extracting f0?
-% [pxx,fwelch] = pwelch(sound,fs*window_s,fs*overlap_s,10*fs,fs);
-% [~,maxloc] = max(pxx);
-% f0 = fwelch(maxloc);
+[pxx,fwelch] = pwelch(x,44100*0.01,220,10*44100,44100);
+[~,maxloc] = max(pxx);
+figure; plot(pxx(1:20000));
 
 % Hyperparameter definitions
-f0 = 1046.4;  % Determined using pwelch to nearest 0.1Hz
-fm = f0;  % Modulation frequency
-Nc = 4;  % Number of carrier frequencies
-fs = 44000;  % Sample rate
-Nharm = 10;  % Number of harmonics in analysis
-Lw = 0.010*fs;  % Analysis window size in samples
-zpf = 4;  % Zero padding factor
-fpass = 22;  % Passband frequency for envelope filter
-Lx = length(x);
-t = (0:Lx-1)*(1/fs);
+params = [];
+% Trumpet: 1046.5
+% Oboe: 439.5
+params.f0 = 1046.5;  % Determined using pwelch to nearest 0.1Hz
+params.fm = params.f0;  % Modulation frequency
+params.Nc = 4;  % Number of carrier frequencies
+params.fs = 44100;  % Sample rate
+params.Nharm = 10;  % Number of harmonics in analysis
+params.Lw = 0.010*params.fs;  % Analysis window size in samples
+params.zpf = 4;  % Zero padding factor
 
-% Chromosome: Nc pairs of (ki, I)
-chromosome = [
-    0   1
-    1   4
-    2   2
-    4   1
-];
+% Harmonic analysis of target spectrum
+T = harmonic_analysis(x,params.fs,params.f0,params.Lw,params.zpf,params.Nharm);
 
-% Parameter definitions and example synthesis
+% Genetic algorithm configuration
+options = optimoptions("ga");
+options.CrossoverFcn = "crossoversinglepoint";
+options.CrossoverFraction = 0.8;
+options.EliteCount = 2;
+options.FunctionTolerance = 10e-10;
+options.MaxGenerations = 300;
+options.MaxStallGenerations = 50;
+options.MutationFcn = "mutationgaussian";
+options.PlotFcn = "gaplotbestf"; %"gaplotbestindiv"; %"gaplotbestf";
+options.PopulationSize = 100;
+options.SelectionFcn = "selectiontournament";
+options.StallTest = "geometricWeighted";
 
-k = chromosome(:,1);
-I = chromosome(:,2);
-y = synth(t,fm,k,I,ones(Nc,Lx));
+% Run genetic algorithm to find best chromosome
+best_chrom = ga( ...
+    @(chrom) evaluate(x, T, modfm, chrom, params), ...
+    2*params.Nc, ...
+    [], ...
+    [], ...
+    [], ...
+    [], ...
+    zeros(1,2*params.Nc), ...
+    [10 20 10 20 10 20 10 20 10 20 10 20], ...
+    [], ...
+    1:2:2*params.Nc, ...
+    options ...
+);
 
-% Solve for W
-T = harmonic_analysis(x,fs,f0,Lw,zpf,Nharm);
-A = harmonic_analysis(y,fs,k*f0,Lw,zpf,Nharm);
-Atrans = permute(A,[2 1 3]);
-W = pagemldivide(pagemtimes(Atrans,A),pagemtimes(Atrans,T));
-W = fillmissing(W,'nearest',3);
+[err, Wavg, That] = evaluate(x, T, modfm, best_chrom, params);
+y = synthesize(length(x), Wavg, synth, best_chrom, params);
+sound(y,params.fs,16);
 
-% Average overlaps in W
-Wavg = W;
-Wavg(:,:,1:2:end) = (W(:,:,1:2:end)+W(:,:,2:2:end))/2;
-Wavg(:,:,2:2:end-1) = (W(:,:,2:2:end-1)+W(:,:,3:2:end))/2;
+% Plot reconstruction
+figure; imagesc(squeeze((T - That).^2)); colorbar;
+Ty = harmonic_analysis(y,params.fs,params.f0,params.Lw,params.zpf,params.Nharm);
+figure; imagesc(squeeze(T)); colorbar;
+figure; imagesc(squeeze(Ty)); colorbar;
+figure; plot(y);
 
-% Determine least squares error (fitness)
-E = T - pagemtimes(A,Wavg);
-err = sum(pagemtimes(permute(E,[2 1 3]),E));
 
-% Sound reconstruction
-w = lowpass(repelem(squeeze(Wavg),1,Lw/2)',fpass,fs)';
-y = synth(t,fm,k,I,w(:,1:length(t)));
-sound(y,fs,16)
 
-% Harmonic analysis
-function A = harmonic_analysis(x,fs,fcs,Lw,zpf,Nharm)
-    Lx = length(x);
-    nfft = Lw*zpf;
-    nwindows = 2*ceil(Lx/Lw);
-    windowsl = zeros(Lw,nwindows/2);
-    windowsr = windowsl;
-    windowsl(1:Lx) = x;
-    windowsr(1:Lx-(Lw/2)) = x(Lw/2+1:end);
-    windows = zeros(nfft,nwindows);
-    windows(1:Lw,1:2:nwindows) = windowsl;
-    windows(1:Lw,2:2:nwindows) = windowsr;
-    spec = fft(windows);
-    specfreqs = (0:nfft-1)*fs/nfft;
-    A = zeros(Nharm,length(fcs),nwindows);
-    % TODO: speed up the interpolation
-    for i = 1:nwindows
-        bins = spec(:,i);
-        for j = 1:length(fcs)
-            for h = 1:Nharm
-%                 A(h,j,i) = abs(bins(round(fcs(j)*h/nfft)))
-                A(h,j,i) = abs(interp1(specfreqs,bins,fcs(j)*h,'linear'));
-            end
-        end
-    end
-end
