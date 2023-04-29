@@ -1,3 +1,4 @@
+% Evaluate fitness and determine envelopes
 function [err, Wavg, That] = evaluate(x, T, synthmodel, chromosome, params)
     f0 = params.f0;  % Determined using pwelch to nearest 0.1Hz
     fm = params.fm;  % Modulation frequency

@@ -1,5 +1,5 @@
 % Harmonic analysis
-function A = harmonic_analysis(x,fs,fc,Lw,zpf,Nharm)
+function [A, spec] = harmonic_analysis(x,fs,fc,Lw,zpf,Nharm)
     nfft = Lw*(1+zpf);
 
     % Do STFT for all windows

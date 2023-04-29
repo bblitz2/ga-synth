@@ -2,40 +2,17 @@ clear variables;
 close all;
 
 modfm = @(t,fm,fc,I) exp(I.*cos(2*pi*fm.*t)).*cos(2*pi*fc.*t); % Normalize? -- should be handled by w
-classicfm = @(t,fm,fc,I) cos(2*pi*fc + I.*sin(2*pi*fm.*t));
+classicfm = @(t,fm,fc,I) cos(2*pi*fc.*t + I.*sin(2*pi*fm.*t));
 synth = @(t,fm,k,I,w) sum(w.*modfm(t,fm,k.*fm,I));
 
-% Load the sound file
-% x = audioread("Oboe.ff.A4.stereo.aiff");
-x = audioread("Trumpet.novib.ff.C6.stereo.aiff");
-
-x = (x(:,1) + x(:,2)) / 2;  % Convert from stereo to mono
-% TODO: better way of extracting f0?
-[pxx,fwelch] = pwelch(x,44100*0.01,220,10*44100,44100);
-[~,maxloc] = max(pxx);
-figure; plot(pxx(1:20000));
-
-% Hyperparameter definitions
-params = [];
-% Trumpet: 1046.5
-% Oboe: 439.5
-params.f0 = 1046.5;  % Determined using pwelch to nearest 0.1Hz
-params.fm = params.f0;  % Modulation frequency
-params.Nc = 4;  % Number of carrier frequencies
-params.fs = 44100;  % Sample rate
-params.Nharm = 10;  % Number of harmonics in analysis
-params.Lw = 0.010*params.fs;  % Analysis window size in samples
-params.zpf = 4;  % Zero padding factor
-
-% Harmonic analysis of target spectrum
-T = harmonic_analysis(x,params.fs,params.f0,params.Lw,params.zpf,params.Nharm);
+fs = 44100;
 
 % Genetic algorithm configuration
 options = optimoptions("ga");
 options.CrossoverFcn = "crossoversinglepoint";
 options.CrossoverFraction = 0.8;
 options.EliteCount = 2;
-options.FunctionTolerance = 10e-10;
+options.FunctionTolerance = 1e-10;
 options.MaxGenerations = 300;
 options.MaxStallGenerations = 50;
 options.MutationFcn = "mutationgaussian";
@@ -44,31 +21,75 @@ options.PopulationSize = 100;
 options.SelectionFcn = "selectiontournament";
 options.StallTest = "geometricWeighted";
 
-% Run genetic algorithm to find best chromosome
-best_chrom = ga( ...
-    @(chrom) evaluate(x, T, modfm, chrom, params), ...
-    2*params.Nc, ...
-    [], ...
-    [], ...
-    [], ...
-    [], ...
-    zeros(1,2*params.Nc), ...
-    [10 20 10 20 10 20 10 20 10 20 10 20], ...
-    [], ...
-    1:2:2*params.Nc, ...
-    options ...
-);
+sound_files = dir("sounds/*.aif");
 
-[err, Wavg, That] = evaluate(x, T, modfm, best_chrom, params);
-y = synthesize(length(x), Wavg, synth, best_chrom, params);
-sound(y,params.fs,16);
+filenames = {...
+    "Trumpet.novib.ff.C6.stereo.aiff", ...
+    "Viola.arco.ff.sulG.C4.stereo.aif", ...
+    "Oboe.ff.A4.stereo.aiff", ...
+    "Horn.ff.C4.stereo.aif", ...
+    "AltoSax.NoVib.ff.C4.stereo.aif", ...
+    "Bass.arco.ff.sulD.C3.stereo.aif", ...
+    "Bassoon.ff.C3.stereo.aif", ...
+    "Cello.arco.ff.sulG.C4.stereo.aif", ...
+    "EbClarinet.ff.C4.stereo.aif", ...
+    "Flute.nonvib.ff.C5.stereo.aif", ...
+    "TenorTrombone.ff.C4.stereo.aif", ...
+    "Tuba.ff.C3.stereo.aif", ...
+    "Violin.arco.ff.sulG.C5.stereo.aif", ...
+};
 
-% Plot reconstruction
-figure; imagesc(squeeze((T - That).^2)); colorbar;
-Ty = harmonic_analysis(y,params.fs,params.f0,params.Lw,params.zpf,params.Nharm);
-figure; imagesc(squeeze(T)); colorbar;
-figure; imagesc(squeeze(Ty)); colorbar;
-figure; plot(y);
+results = [];
+
+for fidx = 10
+    x = audioread(fullfile("sounds", filenames{fidx}));
+    if size(x,2) == 2
+        x = (x(:,1) + x(:,2)) / 2;  % Convert from stereo to mono
+    end
+    f0 = median(pitch(x, fs, "Range", [50 2000], "Method", "SRH"));
+    
+    for Nc = [2 4 6]
+        % Hyperparameter definitions
+        params = [];
+        params.f0 = f0;  % Determined using pwelch to nearest 0.1Hz
+        params.fm = params.f0;  % Modulation frequency
+        params.Nc = Nc;  % Number of carrier frequencies
+        params.fs = 44100;  % Sample rate
+        params.Nharm = 10;  % Number of harmonics in analysis
+        params.Lw = 0.010*params.fs;  % Analysis window size in samples
+        params.zpf = 4;  % Zero padding factor
+        params.f0 = f0;
+        T = harmonic_analysis(x,params.fs,params.f0,params.Lw,params.zpf,params.Nharm);
+
+        fm_methods = {classicfm, modfm};
+        for fm_method_idx = 1:2
+            tic
+            % Run genetic algorithm to find best chromosome
+            [best_chrom,fval,exitflag,output] = ga( ...
+                @(chrom) evaluate(x, T, fm_methods{fm_method_idx}, chrom, params), ...
+                2*params.Nc, ...
+                [], ...
+                [], ...
+                [], ...
+                [], ...
+                zeros(1,2*params.Nc), ...
+                [10 20 10 20 10 20 10 20 10 20 10 20], ...
+                [], ...
+                1:2:2*params.Nc, ...
+                options ...
+            );
+            toc
+            result = [];
+            result.fidx = fidx;
+            result.Nc = Nc;
+            result.fm_method_idx = fm_method_idx;
+            result.best_chrom = best_chrom;
+            result.fval = fval;
+            result.output = output;
+            results = [results result];
+        end
+    end
+end
 
 
 

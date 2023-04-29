@@ -1,2 +1,4 @@
 *.asv
 *.aiff
+sounds/
+results_*
